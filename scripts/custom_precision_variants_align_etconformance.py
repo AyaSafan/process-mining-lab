@@ -42,7 +42,7 @@ class Parameters(Enum):
     CORES = "cores"
 
 
-def apply(log: Union[EventLog, EventStream, pd.DataFrame], net: PetriNet, marking: Marking, final_marking: Marking, parameters: Optional[Dict[Union[str, Parameters], Any]] = None) -> float:
+def apply(log: Union[EventLog, EventStream, pd.DataFrame], net: PetriNet, marking: Marking, final_marking: Marking, parameters: Optional[Dict[Union[str, Parameters], Any]] = None) -> dict:
     """
     Get Align-ET Conformance precision
 
@@ -84,6 +84,9 @@ def apply(log: Union[EventLog, EventStream, pd.DataFrame], net: PetriNet, markin
     align_stop_marking = align_fake_log_stop_marking(fake_log, net, marking, final_marking, parameters=parameters)
     all_markings = transform_markings_from_sync_to_original_net(align_stop_marking, net, parameters=parameters)
 
+    # MODIFIED: collect per-prefix escaping edges for inspection
+    prefix_details = {}
+
     for i in range(len(prefixes)):
         markings = all_markings[i]
 
@@ -107,8 +110,28 @@ def apply(log: Union[EventLog, EventStream, pd.DataFrame], net: PetriNet, markin
                 print("log_transitions=", log_transitions)
                 print("activated_transitions=", activated_transitions_labels)
                 print("escaping_edges=", escaping_edges)
+
+            # MODIFIED: store per-prefix data for the caller
+            prefix_details[prefixes_keys[i]] = {
+                "log_transitions": log_transitions,
+                "activated_transitions": activated_transitions_labels,
+                "escaping_edges": escaping_edges,
+                "count": prefix_count[prefixes_keys[i]],
+                "n_ee": len(escaping_edges),
+                "n_at": len(activated_transitions_labels),
+            }
         else:
             unfit += prefix_count[prefixes_keys[i]]
+            # MODIFIED: store unfit prefix info
+            prefix_details[prefixes_keys[i]] = {
+                "log_transitions": set(),
+                "activated_transitions": set(),
+                "escaping_edges": set(),
+                "count": prefix_count[prefixes_keys[i]],
+                "n_ee": 0,
+                "n_at": 0,
+                "unfit": True,
+            }
 
     if debug_level > 0:
         print("\n")
@@ -127,7 +150,14 @@ def apply(log: Union[EventLog, EventStream, pd.DataFrame], net: PetriNet, markin
     if sum_at > 0:
         precision = 1 - float(sum_ee) / float(sum_at)
 
-    return precision
+    # MODIFIED: return dict with precision + escaping edges details instead of bare float
+    return {
+        "precision": precision,
+        "sum_ee": sum_ee,
+        "sum_at": sum_at,
+        "unfit": unfit,
+        "prefixes": prefix_details,
+    }
 
 
 def transform_markings_from_sync_to_original_net(markings0, net, parameters=None):
