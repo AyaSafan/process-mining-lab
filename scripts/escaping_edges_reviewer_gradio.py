@@ -5,7 +5,6 @@ import tempfile
 import gradio as gr
 import pm4py
 from pm4py.objects.conversion.log import converter as log_converter
-from pm4py.objects.conversion.process_tree import converter as pt_converter
 from pm4py.objects.log.obj import EventLog, Trace, Event
 from pm4py.util import constants as pm4py_constants
 from collections import defaultdict
@@ -76,11 +75,18 @@ def discover(log_path, noise_threshold, progress=gr.Progress()):
     progress(0.1, "Loading log...")
     event_log = log_converter.apply(pm4py.read_xes(log_path))
 
-    progress(0.3, f"Discovering process tree (noise={noise_threshold})...")
-    process_tree = pm4py.discover_process_tree_inductive(event_log, noise_threshold=noise_threshold)
+    if not _imbi_available:
+        raise gr.Error("Inductive Miner - bi is not available. Check the InductiveMiner_bi dependency.")
 
-    progress(0.5, "Converting to Petri net...")
-    net, im, fm = pt_converter.apply(process_tree)
+    progress(0.3, f"Discovering with IMbi (sup={noise_threshold})...")
+    empty_log = EventLog()
+    net, im, fm = _inductive_miner.apply_bi(
+        event_log, empty_log,
+        variant=_inductive_miner.Variants.IMbi,
+        sup=noise_threshold,
+        ratio=0,
+        size_par=0,
+    )
 
     progress(0.6, "Computing metrics...")
     log_fitness = pm4py.fitness_alignments(event_log, net, im, fm, multi_processing=False)["log_fitness"]
@@ -355,9 +361,9 @@ with gr.Blocks(title="Escaping Edges Reviewer") as demo:
             with gr.Row():
                 log_input = gr.File(label="Event Log (.xes)", file_types=[".xes"], type="filepath")
             with gr.Row():
-                noise_slider = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=0.0, label="Noise Threshold")
+                noise_slider = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=0.2, label="IMbi Support")
             with gr.Row():
-                discover_btn = gr.Button("Discover Model", variant="primary", size="lg")
+                discover_btn = gr.Button("Discover with IMbi", variant="primary", size="lg")
             with gr.Row():
                 metrics_box = gr.Textbox(label="Metrics", lines=6)
             with gr.Row():
@@ -421,11 +427,11 @@ with gr.Blocks(title="Escaping Edges Reviewer") as demo:
                 export_undes_file = gr.File(label="Download Undesirable Log", visible=True)
 
         # ---- Tab 4: Rediscover with IMbi ----
-        with gr.Tab("Rediscover with IMbi"):
+        with gr.Tab("Rediscover"):
             gr.Markdown("### Rediscover using IMbi with undesirable log")
             with gr.Row():
-                imbi_noise = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=0.0, label="Support")
-                imbi_ratio = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=0.5, label="Bias Ratio")
+                imbi_noise = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=0.2, label="IMbi Support")
+                imbi_ratio = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=0.5, label="IMbi Ratio")
             with gr.Row():
                 rediscover_btn = gr.Button("Rediscover with IMbi", variant="primary", size="lg")
             with gr.Row():
