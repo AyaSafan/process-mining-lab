@@ -59,15 +59,15 @@ def build_state_rows(result):
     return rows
 
 
-def discover(log_path, progress=gr.Progress()):
+def discover(log_path, noise_threshold, progress=gr.Progress()):
     if not log_path or not log_path.endswith(".xes"):
         raise gr.Error("Please select a .xes file.")
 
     progress(0.1, "Loading log...")
     event_log = log_converter.apply(pm4py.read_xes(log_path))
 
-    progress(0.3, "Discovering process tree...")
-    process_tree = pm4py.discover_process_tree_inductive(event_log)
+    progress(0.3, f"Discovering process tree (noise={noise_threshold})...")
+    process_tree = pm4py.discover_process_tree_inductive(event_log, noise_threshold=noise_threshold)
 
     progress(0.5, "Converting to Petri net...")
     net, im, fm = pt_converter.apply(process_tree)
@@ -116,40 +116,34 @@ def discover(log_path, progress=gr.Progress()):
         f"Sum Escaping Edges: {result['sum_ee']}"
     )
 
-    prefix_str, ee_str, trace_str, nav_txt, des_str, undes_str = _proposal_display(proposals, 0, [], [])
-    return (
-        img_path,
-        metrics,
-        prefix_df,
-        state_df,
-        state,
-        prefix_str,
-        ee_str,
-        trace_str,
-        nav_txt,
-        des_str,
-        undes_str,
-    )
+    dv = _proposal_display(proposals, 0, [], [])
+    return (img_path, metrics, prefix_df, state_df, state, *dv)
 
 
 def _proposal_display(proposals, idx, desirable, undesirable):
-    if not proposals or idx >= len(proposals):
+    des_str = "\n".join(f"{i+1}. {t}" for i, t in enumerate(desirable)) if desirable else "(empty)"
+    undes_str = "\n".join(f"{i+1}. {t}" for i, t in enumerate(undesirable)) if undesirable else "(empty)"
+
+    finished = not proposals or idx >= len(proposals)
+    add_des_btn = gr.Button(interactive=not finished)
+    add_undes_btn = gr.Button(elem_id="undes-btn", variant="primary", interactive=not finished)
+
+    if finished:
         return (
-            "No proposals",
-            "No proposals",
+            "* Done - all proposals reviewed *",
             "",
-            f"0 / 0",
-            "(empty)",
-            "(empty)",
+            "",
+            f"0 / 0   |   Desirable: {len(desirable)}   Undesirable: {len(undesirable)}",
+            des_str,
+            undes_str,
+            add_des_btn,
+            add_undes_btn,
         )
     p = proposals[idx]
     full = p["prefix_acts"] + [p["ee"]] + p.get("suggestion", [])
     prefix_str = " \u2192 ".join(p["prefix_acts"])
     ee_str = p["ee"]
     trace_str = " \u2192 ".join(full)
-
-    des_str = "\n".join(f"{i+1}. {t}" for i, t in enumerate(desirable)) if desirable else "(empty)"
-    undes_str = "\n".join(f"{i+1}. {t}" for i, t in enumerate(undesirable)) if undesirable else "(empty)"
 
     return (
         prefix_str,
@@ -158,51 +152,91 @@ def _proposal_display(proposals, idx, desirable, undesirable):
         f"{idx + 1} / {len(proposals)}   |   Desirable: {len(desirable)}   Undesirable: {len(undesirable)}",
         des_str,
         undes_str,
+        add_des_btn,
+        add_undes_btn,
     )
 
 
 def nav_next(state):
     if state is None or not state["proposals"]:
-        return state, *[""] * 6
-    idx = min(state["idx"] + 1, len(state["proposals"]) - 1)
+        return state, "", "", "", "", "(empty)", "(empty)", gr.Button(interactive=False), gr.Button(elem_id="undes-btn", variant="primary", interactive=False)
+    idx = min(state["idx"] + 1, len(state["proposals"]))
     state["idx"] = idx
     return state, *_proposal_display(state["proposals"], idx, state["desirable"], state["undesirable"])
 
 
 def nav_prev(state):
     if state is None or not state["proposals"]:
-        return state, *[""] * 6
+        return state, "", "", "", "", "(empty)", "(empty)", gr.Button(interactive=False), gr.Button(elem_id="undes-btn", variant="primary", interactive=False)
     idx = max(state["idx"] - 1, 0)
     state["idx"] = idx
     return state, *_proposal_display(state["proposals"], idx, state["desirable"], state["undesirable"])
 
 
 def add_desirable(trace_text, state):
-    if state is None:
-        return state, *[""] * 6
+    if state is None or state["idx"] >= len(state["proposals"]):
+        return state, "", "", "", "", "(empty)", "(empty)", gr.Button(interactive=False), gr.Button(elem_id="undes-btn", variant="primary", interactive=False)
     t = trace_text.strip()
     if not t:
         return state, *_proposal_display(state["proposals"], state["idx"], state["desirable"], state["undesirable"])
     p = state["proposals"][state["idx"]]
     if t not in state["desirable"]:
+        if t in state["undesirable"]:
+            state["undesirable"].remove(t)
         state["desirable"].append(t)
-    idx2 = min(state["idx"] + 1, len(state["proposals"]) - 1)
+    idx2 = min(state["idx"] + 1, len(state["proposals"]))
     state["idx"] = idx2
     return state, *_proposal_display(state["proposals"], idx2, state["desirable"], state["undesirable"])
 
 
 def add_undesirable(trace_text, state):
-    if state is None:
-        return state, *[""] * 6
+    if state is None or state["idx"] >= len(state["proposals"]):
+        return state, "", "", "", "", "(empty)", "(empty)", gr.Button(interactive=False), gr.Button(elem_id="undes-btn", variant="primary", interactive=False)
     t = trace_text.strip()
     if not t:
         return state, *_proposal_display(state["proposals"], state["idx"], state["desirable"], state["undesirable"])
     p = state["proposals"][state["idx"]]
     if t not in state["undesirable"]:
+        if t in state["desirable"]:
+            state["desirable"].remove(t)
         state["undesirable"].append(t)
-    idx2 = min(state["idx"] + 1, len(state["proposals"]) - 1)
+    idx2 = min(state["idx"] + 1, len(state["proposals"]))
     state["idx"] = idx2
     return state, *_proposal_display(state["proposals"], idx2, state["desirable"], state["undesirable"])
+
+
+def manual_add_desirable(trace_text, state):
+    if state is None or not trace_text.strip():
+        if state is None:
+            return state, "(empty)", "(empty)"
+        des_str = "\n".join(f"{i+1}. {t}" for i, t in enumerate(state["desirable"])) if state["desirable"] else "(empty)"
+        undes_str = "\n".join(f"{i+1}. {t}" for i, t in enumerate(state["undesirable"])) if state["undesirable"] else "(empty)"
+        return state, des_str, undes_str
+    t = trace_text.strip()
+    if t not in state["desirable"]:
+        if t in state["undesirable"]:
+            state["undesirable"].remove(t)
+        state["desirable"].append(t)
+    des_str = "\n".join(f"{i+1}. {t}" for i, t in enumerate(state["desirable"])) if state["desirable"] else "(empty)"
+    undes_str = "\n".join(f"{i+1}. {t}" for i, t in enumerate(state["undesirable"])) if state["undesirable"] else "(empty)"
+    return state, des_str, undes_str
+
+
+def manual_add_undesirable(trace_text, state):
+    if state is None or not trace_text.strip():
+        if state is None:
+            return state, "(empty)", "(empty)"
+        des_str = "\n".join(f"{i+1}. {t}" for i, t in enumerate(state["desirable"])) if state["desirable"] else "(empty)"
+        undes_str = "\n".join(f"{i+1}. {t}" for i, t in enumerate(state["undesirable"])) if state["undesirable"] else "(empty)"
+        return state, des_str, undes_str
+    t = trace_text.strip()
+    if t not in state["undesirable"]:
+        if t in state["desirable"]:
+            state["desirable"].remove(t)
+        state["undesirable"].append(t)
+    des_str = "\n".join(f"{i+1}. {t}" for i, t in enumerate(state["desirable"])) if state["desirable"] else "(empty)"
+    undes_str = "\n".join(f"{i+1}. {t}" for i, t in enumerate(state["undesirable"])) if state["undesirable"] else "(empty)"
+    return state, des_str, undes_str
 
 
 def export_desirable(state):
@@ -252,6 +286,8 @@ with gr.Blocks(title="Escaping Edges Reviewer") as demo:
             with gr.Row():
                 log_input = gr.File(label="Event Log (.xes)", file_types=[".xes"], type="filepath")
             with gr.Row():
+                noise_slider = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=0.0, label="Noise Threshold")
+            with gr.Row():
                 discover_btn = gr.Button("Discover Model", variant="primary", size="lg")
             with gr.Row():
                 metrics_box = gr.Textbox(label="Metrics", lines=6)
@@ -300,9 +336,13 @@ with gr.Blocks(title="Escaping Edges Reviewer") as demo:
                 with gr.Column():
                     gr.Markdown("### Desirable Traces")
                     des_list = gr.Textbox(label="", lines=6, interactive=False)
+                    des_add_input = gr.Textbox(label="Add trace manually (activities separated by →)", lines=2, placeholder="e.g. register request → examine casually → decide")
+                    des_add_btn = gr.Button("+ Add to Desirable", variant="primary", size="sm")
                 with gr.Column():
                     gr.Markdown("### Undesirable Traces")
                     undes_list = gr.Textbox(label="", lines=6, interactive=False)
+                    undes_add_input = gr.Textbox(label="Add trace manually (activities separated by →)", lines=2, placeholder="e.g. register request → reject request")
+                    undes_add_btn = gr.Button("+ Add to Undesirable", elem_id="undes-btn", variant="primary", size="sm")
             gr.Markdown("---")
             with gr.Row():
                 export_des_btn = gr.Button("Export Desirable Log (.xes)", variant="secondary")
@@ -319,6 +359,7 @@ with gr.Blocks(title="Escaping Edges Reviewer") as demo:
         state,
         prefix_display, ee_display, trace_input, nav_info,
         des_list, undes_list,
+        add_des_btn, add_undes_btn,
     ]
 
     view_btn.click(
@@ -332,11 +373,11 @@ with gr.Blocks(title="Escaping Edges Reviewer") as demo:
 
     discover_btn.click(
         fn=discover,
-        inputs=[log_input],
+        inputs=[log_input, noise_slider],
         outputs=discover_outputs,
     )
 
-    nav_outputs = [state, prefix_display, ee_display, trace_input, nav_info, des_list, undes_list]
+    nav_outputs = [state, prefix_display, ee_display, trace_input, nav_info, des_list, undes_list, add_des_btn, add_undes_btn]
 
     prev_btn.click(fn=nav_prev, inputs=[state], outputs=nav_outputs)
     next_btn.click(fn=nav_next, inputs=[state], outputs=nav_outputs)
@@ -351,6 +392,18 @@ with gr.Blocks(title="Escaping Edges Reviewer") as demo:
         fn=add_undesirable,
         inputs=[trace_input, state],
         outputs=nav_outputs,
+    )
+
+    des_add_btn.click(
+        fn=manual_add_desirable,
+        inputs=[des_add_input, state],
+        outputs=[state, des_list, undes_list],
+    )
+
+    undes_add_btn.click(
+        fn=manual_add_undesirable,
+        inputs=[undes_add_input, state],
+        outputs=[state, des_list, undes_list],
     )
 
     export_des_btn.click(
