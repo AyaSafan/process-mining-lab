@@ -119,6 +119,7 @@ def apply(log: Union[EventLog, EventStream, pd.DataFrame], net: PetriNet, markin
                 "count": prefix_count[prefixes_keys[i]],
                 "n_ee": len(escaping_edges),
                 "n_at": len(activated_transitions_labels),
+                "markings": markings,
             }
         else:
             unfit += prefix_count[prefixes_keys[i]]
@@ -131,6 +132,7 @@ def apply(log: Union[EventLog, EventStream, pd.DataFrame], net: PetriNet, markin
                 "n_ee": 0,
                 "n_at": 0,
                 "unfit": True,
+                "markings": None,
             }
 
     if debug_level > 0:
