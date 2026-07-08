@@ -11,7 +11,17 @@ from pm4py.util import constants as pm4py_constants
 from collections import defaultdict
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "InductiveMiner_bi"))
 import custom_precision_variants_align_etconformance as custom_ae
+import save_proposals
+
+# Defer IMbi import to avoid startup failures if InductiveMiner_bi deps are missing
+_imbi_available = False
+try:
+    from local_pm4py.algo.discovery.inductive import algorithm as _inductive_miner
+    _imbi_available = True
+except ImportError:
+    pass
 import save_proposals
 
 VSEP = pm4py_constants.DEFAULT_VARIANT_SEP
@@ -273,6 +283,65 @@ def export_undesirable(state):
     return path
 
 
+def _build_undesirable_log(state):
+    logM = EventLog()
+    for s in state["undesirable"]:
+        acts = [a.strip() for a in s.split("\u2192") if a.strip()]
+        trace = Trace()
+        for a in acts:
+            ev = Event()
+            ev[ACTIVITY_KEY] = a
+            trace.append(ev)
+        logM.append(trace)
+    return logM
+
+
+def rediscover_imbi(state, noise_threshold, ratio, progress=gr.Progress()):
+    if state is None:
+        raise gr.Error("Discover a model first.")
+
+    logP = state["log"]
+    logM = _build_undesirable_log(state)
+
+    if len(logM) == 0:
+        raise gr.Error("No undesirable traces collected. Add some traces to the undesirable log first.")
+
+    size_par = len(logP) / len(logM)
+
+    if not _imbi_available:
+        raise gr.Error("Inductive Miner - bi is not available. Check the InductiveMiner_bi dependency.")
+
+    progress(0.2, "Running Inductive Miner - bi...")
+    net, im, fm = _inductive_miner.apply_bi(
+        logP, logM,
+        variant=_inductive_miner.Variants.IMbi,
+        sup=noise_threshold,
+        ratio=ratio,
+        size_par=size_par,
+    )
+
+    progress(0.6, "Computing metrics...")
+    log_fitness = pm4py.fitness_alignments(logP, net, im, fm, multi_processing=False)["log_fitness"]
+    precision = pm4py.precision_alignments(logP, net, im, fm, multi_processing=False)
+    denominator = log_fitness + precision
+    f1 = 2 * (log_fitness * precision) / denominator if denominator != 0 else 0.0
+    size = len(net.places) + len(net.transitions) + len(net.arcs)
+
+    progress(0.8, "Rendering Petri net...")
+    img_path = os.path.join(tempfile.gettempdir(), "petri_net_imbi_preview.png")
+    pm4py.save_vis_petri_net(net, im, fm, img_path)
+
+    metrics = (
+        f"Fitness: {log_fitness:.4f}\n"
+        f"Precision: {precision:.4f}\n"
+        f"F1 Score: {f1:.4f}\n"
+        f"Model Size: {size}\n"
+        f"Undesirable traces used: {len(logM)} / {len(state['undesirable'])}"
+    )
+
+    return img_path, metrics
+
+
 # --- Build UI ---
 
 with gr.Blocks(title="Escaping Edges Reviewer") as demo:
@@ -351,6 +420,19 @@ with gr.Blocks(title="Escaping Edges Reviewer") as demo:
                 export_des_file = gr.File(label="Download Desirable Log", visible=True)
                 export_undes_file = gr.File(label="Download Undesirable Log", visible=True)
 
+        # ---- Tab 4: Rediscover with IMbi ----
+        with gr.Tab("Rediscover with IMbi"):
+            gr.Markdown("### Rediscover using IMbi with undesirable log")
+            with gr.Row():
+                imbi_noise = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=0.0, label="Support")
+                imbi_ratio = gr.Slider(minimum=0.0, maximum=1.0, step=0.05, value=0.5, label="Bias Ratio")
+            with gr.Row():
+                rediscover_btn = gr.Button("Rediscover with IMbi", variant="primary", size="lg")
+            with gr.Row():
+                imbi_metrics = gr.Textbox(label="Metrics", lines=6)
+            with gr.Row():
+                imbi_img = gr.Image(label="Rediscovered Petri Net", height=400)
+
     # --- event wiring ---
 
     discover_outputs = [
@@ -416,6 +498,12 @@ with gr.Blocks(title="Escaping Edges Reviewer") as demo:
         fn=export_undesirable,
         inputs=[state],
         outputs=[export_undes_file],
+    )
+
+    rediscover_btn.click(
+        fn=rediscover_imbi,
+        inputs=[state, imbi_noise, imbi_ratio],
+        outputs=[imbi_img, imbi_metrics],
     )
 
 
