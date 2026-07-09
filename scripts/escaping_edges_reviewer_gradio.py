@@ -302,6 +302,34 @@ def _build_undesirable_log(state):
     return logM
 
 
+def show_dfg(log_path, progress=gr.Progress()):
+    if not log_path or not log_path.endswith(".xes"):
+        raise gr.Error("Please select a .xes file.")
+
+    progress(0.2, "Loading log...")
+    event_log = pm4py.read_xes(log_path)
+
+    progress(0.5, "Computing DFG...")
+    dfg, start_activities, end_activities = pm4py.discover_dfg(event_log)
+
+    variants = pm4py.get_variants(event_log)
+    n_traces = len(event_log)
+    n_variants = len(variants)
+    n_activities = len(pm4py.get_event_attribute_values(event_log, "concept:name"))
+    stats = (
+        f"Traces: {n_traces}\n"
+        f"Variants: {n_variants}\n"
+        f"Activities: {n_activities}\n"
+        f"DFG edges: {len(dfg)}"
+    )
+
+    progress(0.8, "Rendering DFG...")
+    img_path = os.path.join(tempfile.gettempdir(), "dfg_preview.png")
+    pm4py.save_vis_dfg(dfg, start_activities, end_activities, img_path)
+
+    return img_path, stats
+
+
 def rediscover_imbi(state, noise_threshold, ratio, progress=gr.Progress()):
     if state is None:
         raise gr.Error("Discover a model first.")
@@ -312,14 +340,27 @@ def rediscover_imbi(state, noise_threshold, ratio, progress=gr.Progress()):
     if len(logM) == 0:
         raise gr.Error("No undesirable traces collected. Add some traces to the undesirable log first.")
 
-    size_par = len(logP) / len(logM)
+    # Combine original log with desirable traces as positive examples
+    des_log = EventLog()
+    for s in state["desirable"]:
+        acts = [a.strip() for a in s.split("\u2192") if a.strip()]
+        trace = Trace()
+        for a in acts:
+            ev = Event()
+            ev[ACTIVITY_KEY] = a
+            trace.append(ev)
+        des_log.append(trace)
+    for t in logP:
+        des_log.append(t)
+
+    size_par = len(des_log) / len(logM)
 
     if not _imbi_available:
         raise gr.Error("Inductive Miner - bi is not available. Check the InductiveMiner_bi dependency.")
 
     progress(0.2, "Running Inductive Miner - bi...")
     net, im, fm = _inductive_miner.apply_bi(
-        logP, logM,
+        des_log, logM,
         variant=_inductive_miner.Variants.IMbi,
         sup=noise_threshold,
         ratio=ratio,
@@ -327,8 +368,8 @@ def rediscover_imbi(state, noise_threshold, ratio, progress=gr.Progress()):
     )
 
     progress(0.6, "Computing metrics...")
-    log_fitness = pm4py.fitness_alignments(logP, net, im, fm, multi_processing=False)["log_fitness"]
-    precision = pm4py.precision_alignments(logP, net, im, fm, multi_processing=False)
+    log_fitness = pm4py.fitness_alignments(des_log, net, im, fm, multi_processing=False)["log_fitness"]
+    precision = pm4py.precision_alignments(des_log, net, im, fm, multi_processing=False)
     denominator = log_fitness + precision
     f1 = 2 * (log_fitness * precision) / denominator if denominator != 0 else 0.0
     size = len(net.places) + len(net.transitions) + len(net.arcs)
@@ -342,7 +383,7 @@ def rediscover_imbi(state, noise_threshold, ratio, progress=gr.Progress()):
         f"Precision: {precision:.4f}\n"
         f"F1 Score: {f1:.4f}\n"
         f"Model Size: {size}\n"
-        f"Undesirable traces used: {len(logM)} / {len(state['undesirable'])}"
+        f"Original traces: {len(state['log'])} | Desirable added: {len(state['desirable'])} | Undesirable: {len(logM)} / {len(state['undesirable'])}"
     )
 
     return img_path, metrics
@@ -356,8 +397,36 @@ with gr.Blocks(title="Escaping Edges Reviewer") as demo:
     gr.Markdown("Discover a process model, analyze escaping edges, review proposals, and build desirable/undesirable logs.")
 
     with gr.Tabs():
-        # ---- Tab 1: Load & Discover ----
+        # ---- Tab 1: Investigate ----
+        with gr.Tab("Investigate"):
+            gr.Markdown(
+                "Explore the event log before discovery. View the Directly-Follows Graph (DFG) "
+                "and basic log statistics."
+            )
+            with gr.Row():
+                investigate_input = gr.File(label="Event Log (.xes)", file_types=[".xes"], type="filepath")
+            with gr.Row():
+                investigate_btn = gr.Button("Show DFG", variant="primary", size="lg")
+            with gr.Row():
+                investigate_stats = gr.Textbox(label="Log Statistics", lines=4, interactive=False)
+            with gr.Row():
+                investigate_img = gr.Image(label="Directly-Follows Graph", height=500)
+
+        # ---- Tab 2: Load & Discover ----
         with gr.Tab("Load & Discover"):
+            gr.Markdown(
+                "**What is IMbi?**  \n"
+                "Inductive Miner with bias — discovers a process model using desirable behavior (log⁺) "
+                "while penalizing undesirable behavior (log⁻).\n"
+                "\n"
+                "**Support** (0–1) — noise tolerance. Higher → more general model.  \n"
+                "**Ratio** (0–1) — how strongly undesirable traces are penalized. Higher → more aggressive suppression.\n"
+                "\n"
+                "**Workflow:**  \n"
+                "1. Load a log and **Discover** (no negative examples yet).  \n"
+                "2. Review proposals and collect desirable/undesirable traces in **Proposals Review**.  \n"
+                "3. Rediscover with bias in **Rediscover with IMbi** tab."
+            )
             with gr.Row():
                 log_input = gr.File(label="Event Log (.xes)", file_types=[".xes"], type="filepath")
             with gr.Row():
@@ -498,6 +567,12 @@ with gr.Blocks(title="Escaping Edges Reviewer") as demo:
         fn=export_desirable,
         inputs=[state],
         outputs=[export_des_file],
+    )
+
+    investigate_btn.click(
+        fn=show_dfg,
+        inputs=[investigate_input],
+        outputs=[investigate_img, investigate_stats],
     )
 
     export_undes_btn.click(
