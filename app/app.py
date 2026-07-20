@@ -219,9 +219,15 @@ elif page == PAGES[2]:
                     for k, v in st.session_state["activity_results"].items():
                         all_results[f"[Variant Based] {k}"] = v
 
-                selected = []
+                # Assign PBB numbers
+                pbb_labels = {}
+                for i, label in enumerate(all_results, start=1):
+                    pbb_labels[label] = f"PBB{i}"
+
+                # Show all PBBs in expanders
                 for label, result in all_results.items():
-                    with st.expander(f"**{label}** — Fitness: {result['fitness']:.4f} | Precision: {result['precision']:.4f} | {result['n_sublogs']} sublogs", expanded=True):
+                    pbb_name = pbb_labels[label]
+                    with st.expander(f"**{pbb_name}** ({label}) — Fitness: {result['fitness']:.4f} | Precision: {result['precision']:.4f} | {result['n_sublogs']} sublogs", expanded=True):
                         st.write("**Variants allowed:**")
                         for seq, count in result["variants_allowed"]:
                             st.write(f"  [{count:3d}x] {seq}")
@@ -230,27 +236,35 @@ elif page == PAGES[2]:
                             for seq, count in result["variants_not_allowed"]:
                                 st.write(f"  [{count:3d}x] {seq}")
                         try:
-                            tmp_bpmn = Path(tempfile.gettempdir()) / f"bpmn_{label}.png"
+                            tmp_bpmn = Path(tempfile.gettempdir()) / f"bpmn_{pbb_name}.png"
                             pm4py.save_vis_bpmn(result["bpmn"], str(tmp_bpmn))
                             st.image(str(tmp_bpmn))
                         except Exception as e:
                             st.warning(f"Could not render BPMN: {e}")
-                        if st.checkbox("Select for export", key=f"sel_{label}"):
-                            selected.append(label)
 
-                if selected:
-                    st.divider()
-                    st.subheader("Export")
-                    for label in selected:
+                # Selection for export
+                st.divider()
+                st.subheader("Export")
+                pbb_options = [f"{pbb_labels[k]} ({k})" for k in all_results]
+                pbb_key_map = {f"{pbb_labels[k]} ({k})": k for k in all_results}
+                with st.form("export_form"):
+                    selected_display = st.multiselect(
+                        "Select PBBs to export",
+                        options=pbb_options,
+                    )
+                    submitted = st.form_submit_button("Prepare Downloads")
+                if submitted and selected_display:
+                    for display in selected_display:
+                        label = pbb_key_map[display]
+                        pbb_name = pbb_labels[label]
                         bpmn = all_results[label]["bpmn"]
-                        safe_name = label.replace("[", "").replace("]", "").replace(" ", "_")
-                        tmp_xml = Path(tempfile.gettempdir()) / f"{safe_name}.bpmn"
+                        tmp_xml = Path(tempfile.gettempdir()) / f"{pbb_name}.bpmn"
                         pm4py.write_bpmn(bpmn, str(tmp_xml))
                         bpmn_xml = tmp_xml.read_bytes()
                         st.download_button(
-                            label=f"Download {safe_name}.bpmn",
+                            label=f"Download {pbb_name}.bpmn",
                             data=bpmn_xml,
-                            file_name=f"{safe_name}.bpmn",
+                            file_name=f"{pbb_name}.bpmn",
                             mime="application/xml",
-                            key=f"dl_{safe_name}",
+                            key=f"dl_{pbb_name}",
                         )
