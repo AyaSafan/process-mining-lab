@@ -214,7 +214,8 @@ elif page == PAGES[2]:
             # --- Display results & export ---
             has_boundary = "boundary_results" in st.session_state
             has_activity = "activity_results" in st.session_state
-            if has_boundary or has_activity:
+            has_combined = "combined_results" in st.session_state
+            if has_boundary or has_activity or has_combined:
                 all_results = {}
                 if has_boundary:
                     for k, v in st.session_state["boundary_results"].items():
@@ -222,8 +223,10 @@ elif page == PAGES[2]:
                 if has_activity:
                     for k, v in st.session_state["activity_results"].items():
                         all_results[f"[Variant Based] {k}"] = v
+                if has_combined:
+                    for k, v in st.session_state["combined_results"].items():
+                        all_results[k] = v
 
-                # Assign PBB numbers
                 pbb_labels = {}
                 for i, label in enumerate(all_results, start=1):
                     pbb_labels[label] = f"PBB{i}"
@@ -278,10 +281,19 @@ elif page == PAGES[2]:
                         bpmns = [all_results[pbb_key_map[d]]["bpmn"] for d in ordered]
                         with st.spinner("Chaining BPMNs..."):
                             combined_bpmn = combine_horizontal(bpmns)
-                        st.session_state["combined_bpmn"] = combined_bpmn
-                        st.session_state["combined_label"] = " → ".join(
+                        combined_name = " → ".join(
                             pbb_labels[pbb_key_map[d]] for d in ordered
                         )
+                        combined_key = f"[Combined] {combined_name}"
+                        combined_pbb = {
+                            "bpmn": combined_bpmn,
+                            "fitness": 0.0,
+                            "precision": 0.0,
+                            "n_sublogs": 0,
+                            "variants_allowed": [],
+                            "variants_not_allowed": [],
+                        }
+                        st.session_state.setdefault("combined_results", {})[combined_key] = combined_pbb
 
                 else:
                     with st.expander("How it works", expanded=False):
@@ -304,49 +316,27 @@ elif page == PAGES[2]:
                             combined_result = combine_vertical(
                                 sublogs, st.session_state.get("orig_area_map")
                             )
-                        st.session_state["combined_bpmn"] = combined_result["bpmn"]
-                        st.session_state["combined_result"] = combined_result
-                        st.session_state["combined_label"] = " + ".join(
+                        combined_name = " + ".join(
                             pbb_labels[pbb_key_map[d]] for d in chosen
                         )
-
-                if "combined_bpmn" in st.session_state:
-                    st.divider()
-                    st.subheader(f"Combined: {st.session_state['combined_label']}")
-                    if "combined_result" in st.session_state:
-                        r = st.session_state["combined_result"]
-                        st.write(f"Fitness: {r['fitness']:.4f} | Precision: {r['precision']:.4f} | {r['n_sublogs']} sublogs")
-                    try:
-                        tmp_bpmn = Path(tempfile.gettempdir()) / "bpmn_combined.png"
-                        pm4py.save_vis_bpmn(st.session_state["combined_bpmn"], str(tmp_bpmn))
-                        st.image(str(tmp_bpmn))
-                    except Exception as e:
-                        st.warning(f"Could not render BPMN: {e}")
+                        combined_key = f"[Combined] {combined_name}"
+                        combined_result["sub_df"] = pd.concat(sublogs, ignore_index=True)
+                        st.session_state.setdefault("combined_results", {})[combined_key] = combined_result
 
                 # Selection for export
                 st.divider()
                 st.subheader("Export")
-                export_options = list(pbb_options)
-                export_key_map = dict(pbb_key_map)
-                if "combined_bpmn" in st.session_state:
-                    combined_label = f"Combined: {st.session_state['combined_label']}"
-                    export_options.append(combined_label)
-                    export_key_map[combined_label] = "__combined__"
                 with st.form("export_form"):
                     selected_display = st.multiselect(
                         "Select PBBs to export",
-                        options=export_options,
+                        options=pbb_options,
                     )
                     submitted = st.form_submit_button("Prepare Downloads")
                 if submitted and selected_display:
                     for display in selected_display:
-                        key = export_key_map[display]
-                        if key == "__combined__":
-                            pbb_name = "Combined"
-                            bpmn = st.session_state["combined_bpmn"]
-                        else:
-                            pbb_name = pbb_labels[key]
-                            bpmn = all_results[key]["bpmn"]
+                        key = pbb_key_map[display]
+                        pbb_name = pbb_labels[key]
+                        bpmn = all_results[key]["bpmn"]
                         tmp_xml = Path(tempfile.gettempdir()) / f"{pbb_name}.bpmn"
                         pm4py.write_bpmn(bpmn, str(tmp_xml))
                         bpmn_xml = tmp_xml.read_bytes()
