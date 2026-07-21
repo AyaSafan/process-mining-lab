@@ -20,9 +20,9 @@ st.title("PBB Miner")
 PAGES = ["1. Upload & Convert", "2. Unify PROCESSAREA", "3. Split, Mine & Export"]
 
 if "_page" in st.session_state:
-    page = st.sidebar.radio("Navigate", PAGES, index=st.session_state["_page"])
+    page = st.sidebar.radio("", PAGES, index=st.session_state["_page"])
 else:
-    page = st.sidebar.radio("Navigate", PAGES)
+    page = st.sidebar.radio("", PAGES)
 
 page_idx = PAGES.index(page)
 st.session_state["_page"] = page_idx
@@ -325,6 +325,7 @@ elif page == PAGES[2]:
                             "fitness": 0.0,
                             "precision": 0.0,
                             "n_sublogs": 0,
+                            "n_events": 0,
                             "variants_allowed": [],
                             "variants_not_allowed": [],
                         }
@@ -359,27 +360,42 @@ elif page == PAGES[2]:
                         st.session_state.setdefault("combined_results", {})[combined_key] = combined_result
                         st.rerun()
 
-                # Selection for export
+                # Export all
                 st.divider()
                 st.subheader("Export")
-                with st.form("export_form"):
-                    selected_display = st.multiselect(
-                        "Select PBBs to export",
-                        options=pbb_options,
+                if st.button("Export All PBBs"):
+                    import zipfile, io, csv
+
+                    buf = io.BytesIO()
+                    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                        # --- write summary.txt ---
+                        lines = []
+                        for label, result in all_results.items():
+                            pbb_name = pbb_labels[label]
+                            lines.append(f"{pbb_name}\t{label}")
+                            lines.append(f"  Fitness: {result['fitness']:.4f}  Precision: {result['precision']:.4f}  Sublogs: {result['n_sublogs']}  Events: {result['n_events']}")
+                            if result["variants_allowed"]:
+                                lines.append("  Allowed variants:")
+                                for seq, count in result["variants_allowed"]:
+                                    lines.append(f"    [{count:3d}x] {seq}")
+                            if result["variants_not_allowed"]:
+                                lines.append("  Not-allowed variants:")
+                                for seq, count in result["variants_not_allowed"]:
+                                    lines.append(f"    [{count:3d}x] {seq}")
+                            lines.append("")
+                        zf.writestr("summary.txt", "\n".join(lines))
+
+                        # --- write each BPMN ---
+                        for label, result in all_results.items():
+                            pbb_name = pbb_labels[label]
+                            tmp_bpmn = Path(tempfile.gettempdir()) / f"{pbb_name}.bpmn"
+                            pm4py.write_bpmn(result["bpmn"], str(tmp_bpmn))
+                            zf.write(tmp_bpmn, arcname=f"{pbb_name}.bpmn")
+
+                    st.download_button(
+                        label="Download All PBBs (zip)",
+                        data=buf.getvalue(),
+                        file_name="PBBs.zip",
+                        mime="application/zip",
+                        key="dl_all_zip",
                     )
-                    submitted = st.form_submit_button("Prepare Downloads")
-                if submitted and selected_display:
-                    for display in selected_display:
-                        key = pbb_key_map[display]
-                        pbb_name = pbb_labels[key]
-                        bpmn = all_results[key]["bpmn"]
-                        tmp_xml = Path(tempfile.gettempdir()) / f"{pbb_name}.bpmn"
-                        pm4py.write_bpmn(bpmn, str(tmp_xml))
-                        bpmn_xml = tmp_xml.read_bytes()
-                        st.download_button(
-                            label=f"Download {pbb_name}.bpmn",
-                            data=bpmn_xml,
-                            file_name=f"{pbb_name}.bpmn",
-                            mime="application/xml",
-                            key=f"dl_{pbb_name}",
-                        )
