@@ -12,6 +12,7 @@ from core.unify import unify_processarea
 from core.split import split_traces
 from core.group import run_activity_grouping, format_group_label
 from core.mine import mine_group
+from core.combine import combine_horizontal, combine_vertical
 
 st.set_page_config(page_title="PBB Miner", layout="wide")
 st.title("PBB Miner")
@@ -169,6 +170,7 @@ elif page == PAGES[2]:
                 orig_area_map = {}
                 for oper, grp in split_df.groupby("concept:name"):
                     orig_area_map[oper] = grp["PROCESSAREA"].value_counts().index[0]
+                st.session_state["orig_area_map"] = orig_area_map
 
                 boundary_results = {}
                 groups_boundary = {}
@@ -183,6 +185,7 @@ elif page == PAGES[2]:
                     label = f"{area}_seg{seg_idx}"
                     with st.spinner(f"Mining {label}..."):
                         result = mine_group(sub_df, orig_area_map)
+                    result["sub_df"] = sub_df
                     boundary_results[label] = result
                     progress.progress((i + 1) / (total * 2))
 
@@ -201,6 +204,7 @@ elif page == PAGES[2]:
                     sub_df = split_df[mask].copy()
                     with st.spinner(f"Mining {label}..."):
                         result = mine_group(sub_df, orig_area_map)
+                    result["sub_df"] = sub_df
                     activity_results[label] = result
                     progress.progress((total + i + 1) / (total + len(groups_activity)))
 
@@ -223,6 +227,8 @@ elif page == PAGES[2]:
                 pbb_labels = {}
                 for i, label in enumerate(all_results, start=1):
                     pbb_labels[label] = f"PBB{i}"
+                pbb_options = [f"{pbb_labels[k]} ({k})" for k in all_results]
+                pbb_key_map = {f"{pbb_labels[k]} ({k})": k for k in all_results}
 
                 # Show all PBBs in expanders
                 for label, result in all_results.items():
@@ -242,22 +248,105 @@ elif page == PAGES[2]:
                         except Exception as e:
                             st.warning(f"Could not render BPMN: {e}")
 
+                # --- Combine PBBs ---
+                st.divider()
+                st.subheader("Combine PBBs")
+                combine_mode = st.radio(
+                    "Select combination mode",
+                    ["Chain Models", "Merge & Re-mine"],
+                    horizontal=True,
+                )
+
+                if combine_mode == "Chain Models":
+                    with st.expander("How it works", expanded=False):
+                        st.markdown(
+                            "**Chains full BPMN models** end-to-end into one unified diagram. "
+                            "The end event of each model is bridged to the start event of the next; "
+                            "all gateways, branches and internal structure are **preserved**.\n\n"
+                            "- Selection **order matters** — it defines the execution sequence.\n"
+                            "- The intermediate start/end events are removed and the models are "
+                            "reconnected directly.\n"
+                            "- No re-mining or conformance check — it is a structural merge only."
+                        )
+                    with st.form("combine_h_form"):
+                        ordered = st.multiselect(
+                            "Select PBBs (in order)",
+                            options=pbb_options,
+                        )
+                        combine_h_submitted = st.form_submit_button("Chain Models")
+                    if combine_h_submitted and len(ordered) >= 2:
+                        bpmns = [all_results[pbb_key_map[d]]["bpmn"] for d in ordered]
+                        with st.spinner("Chaining BPMNs..."):
+                            combined_bpmn = combine_horizontal(bpmns)
+                        st.session_state["combined_bpmn"] = combined_bpmn
+                        st.session_state["combined_label"] = " → ".join(
+                            pbb_labels[pbb_key_map[d]] for d in ordered
+                        )
+
+                else:
+                    with st.expander("How it works", expanded=False):
+                        st.markdown(
+                            "**Merges raw event logs** from selected PBBs into one dataset "
+                            "and **re-discovers** a fresh BPMN using Split Miner.\n\n"
+                            "- Selection **order does not matter** — events are combined regardless.\n"
+                            "- Gateways, duplicates and parallelism are **preserved** in the new model.\n"
+                            "- Fitness and precision are re-evaluated on the merged log."
+                        )
+                    with st.form("combine_v_form"):
+                        chosen = st.multiselect(
+                            "Select PBBs to merge",
+                            options=pbb_options,
+                        )
+                        combine_v_submitted = st.form_submit_button("Merge & Re-mine")
+                    if combine_v_submitted and len(chosen) >= 2:
+                        sublogs = [all_results[pbb_key_map[d]]["sub_df"] for d in chosen]
+                        with st.spinner("Merging logs & re-mining..."):
+                            combined_result = combine_vertical(
+                                sublogs, st.session_state.get("orig_area_map")
+                            )
+                        st.session_state["combined_bpmn"] = combined_result["bpmn"]
+                        st.session_state["combined_result"] = combined_result
+                        st.session_state["combined_label"] = " + ".join(
+                            pbb_labels[pbb_key_map[d]] for d in chosen
+                        )
+
+                if "combined_bpmn" in st.session_state:
+                    st.divider()
+                    st.subheader(f"Combined: {st.session_state['combined_label']}")
+                    if "combined_result" in st.session_state:
+                        r = st.session_state["combined_result"]
+                        st.write(f"Fitness: {r['fitness']:.4f} | Precision: {r['precision']:.4f} | {r['n_sublogs']} sublogs")
+                    try:
+                        tmp_bpmn = Path(tempfile.gettempdir()) / "bpmn_combined.png"
+                        pm4py.save_vis_bpmn(st.session_state["combined_bpmn"], str(tmp_bpmn))
+                        st.image(str(tmp_bpmn))
+                    except Exception as e:
+                        st.warning(f"Could not render BPMN: {e}")
+
                 # Selection for export
                 st.divider()
                 st.subheader("Export")
-                pbb_options = [f"{pbb_labels[k]} ({k})" for k in all_results]
-                pbb_key_map = {f"{pbb_labels[k]} ({k})": k for k in all_results}
+                export_options = list(pbb_options)
+                export_key_map = dict(pbb_key_map)
+                if "combined_bpmn" in st.session_state:
+                    combined_label = f"Combined: {st.session_state['combined_label']}"
+                    export_options.append(combined_label)
+                    export_key_map[combined_label] = "__combined__"
                 with st.form("export_form"):
                     selected_display = st.multiselect(
                         "Select PBBs to export",
-                        options=pbb_options,
+                        options=export_options,
                     )
                     submitted = st.form_submit_button("Prepare Downloads")
                 if submitted and selected_display:
                     for display in selected_display:
-                        label = pbb_key_map[display]
-                        pbb_name = pbb_labels[label]
-                        bpmn = all_results[label]["bpmn"]
+                        key = export_key_map[display]
+                        if key == "__combined__":
+                            pbb_name = "Combined"
+                            bpmn = st.session_state["combined_bpmn"]
+                        else:
+                            pbb_name = pbb_labels[key]
+                            bpmn = all_results[key]["bpmn"]
                         tmp_xml = Path(tempfile.gettempdir()) / f"{pbb_name}.bpmn"
                         pm4py.write_bpmn(bpmn, str(tmp_xml))
                         bpmn_xml = tmp_xml.read_bytes()
