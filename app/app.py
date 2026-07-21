@@ -37,49 +37,66 @@ def add_next_button():
 
 # ── Page 1: Upload & Convert ─────────────────────────────────────────────────
 if page == PAGES[0]:
-    st.header("Upload CSV and convert to XES")
-    uploaded = st.file_uploader("Upload a process flow CSV", type=["csv"])
+    st.header("Upload CSV or XES")
+    uploaded = st.file_uploader("Upload a process flow CSV or XES file", type=["csv", "xes"])
 
     if uploaded:
-        raw_bytes = uploaded.read()
         tmp = Path(tempfile.gettempdir()) / uploaded.name
-        tmp.write_bytes(raw_bytes)
 
-        sep = ";" if ";" in raw_bytes.decode("utf-8", errors="ignore").split("\n")[0] else ","
-        peek = pd.read_csv(tmp, sep=sep, dtype=str, nrows=5)
-        detected = detect_columns(peek)
-
-        st.subheader("Column Mapping")
-        st.caption("Auto-detected columns. Adjust if needed.")
-        cols = peek.columns.tolist()
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            case_col = st.selectbox("Case ID", cols, index=cols.index(detected["case"]) if detected["case"] in cols else 0)
-        with col2:
-            activity_col = st.selectbox("Activity", cols, index=cols.index(detected["activity"]) if detected["activity"] in cols else 0)
-        with col3:
-            order_col = st.selectbox("Order", cols, index=cols.index(detected["order"]) if detected["order"] in cols else 0)
-        with col4:
-            pa_col = st.selectbox("Process Area", ["(none)"] + cols,
-                                  index=(cols.index(detected["process_area"]) + 1) if detected.get("process_area") in cols else 0)
-
-        if st.button("Convert to XES"):
-            mapping = {
-                "case": case_col,
-                "activity": activity_col,
-                "order": order_col,
-                "process_area": pa_col if pa_col != "(none)" else None,
-            }
-            with st.spinner("Converting..."):
-                events, log = csv_to_xes(tmp, mapping)
-                summary = get_summary(events)
-
+        if uploaded.name.lower().endswith(".xes"):
+            raw_bytes = uploaded.read()
+            tmp.write_bytes(raw_bytes)
+            with st.spinner("Reading XES..."):
+                log = pm4py.read_xes(str(tmp))
+                events = pm4py.convert_to_dataframe(log)
             st.session_state["events"] = events
             st.session_state["log"] = log
-            st.session_state["summary"] = summary
-
-            st.success(f"Converted: {summary['traces']} traces, {summary['events']} events")
+            st.session_state["summary"] = {
+                "traces": events["case:concept:name"].nunique(),
+                "events": len(events),
+                "activities": events["concept:name"].unique().tolist(),
+            }
+            st.success(f"Loaded: {st.session_state['summary']['traces']} traces, {st.session_state['summary']['events']} events")
             st.dataframe(events.head(20), use_container_width=True)
+        else:
+            raw_bytes = uploaded.read()
+            tmp.write_bytes(raw_bytes)
+
+            sep = ";" if ";" in raw_bytes.decode("utf-8", errors="ignore").split("\n")[0] else ","
+            peek = pd.read_csv(tmp, sep=sep, dtype=str, nrows=5)
+            detected = detect_columns(peek)
+
+            st.subheader("Column Mapping")
+            st.caption("Auto-detected columns. Adjust if needed.")
+            cols = peek.columns.tolist()
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                case_col = st.selectbox("Case ID", cols, index=cols.index(detected["case"]) if detected["case"] in cols else 0)
+            with col2:
+                activity_col = st.selectbox("Activity", cols, index=cols.index(detected["activity"]) if detected["activity"] in cols else 0)
+            with col3:
+                order_col = st.selectbox("Order", cols, index=cols.index(detected["order"]) if detected["order"] in cols else 0)
+            with col4:
+                pa_col = st.selectbox("Process Area", ["(none)"] + cols,
+                                      index=(cols.index(detected["process_area"]) + 1) if detected.get("process_area") in cols else 0)
+
+            if st.button("Convert to XES"):
+                mapping = {
+                    "case": case_col,
+                    "activity": activity_col,
+                    "order": order_col,
+                    "process_area": pa_col if pa_col != "(none)" else None,
+                }
+                with st.spinner("Converting..."):
+                    events, log = csv_to_xes(tmp, mapping)
+                    summary = get_summary(events)
+
+                st.session_state["events"] = events
+                st.session_state["log"] = log
+                st.session_state["summary"] = summary
+
+                st.success(f"Converted: {summary['traces']} traces, {summary['events']} events")
+                st.dataframe(events.head(20), use_container_width=True)
 
     if "summary" in st.session_state:
         st.subheader("Current Log Summary")
@@ -172,14 +189,23 @@ elif page == PAGES[2]:
                     orig_area_map[oper] = grp["PROCESSAREA"].value_counts().index[0]
                 st.session_state["orig_area_map"] = orig_area_map
 
+                # Only mine boundary PBBs for groups with >1 activity set
                 boundary_results = {}
                 groups_boundary = {}
                 for (seg_idx, area), grp in split_df.groupby(["_seg_idx", "PROCESSAREA"]):
                     groups_boundary[(seg_idx, area)] = grp["case:concept:name"].unique().tolist()
 
+                multi_act_groups = {
+                    key for key, act_groups in activity_groups.items()
+                    if len(act_groups) > 1
+                }
+
                 progress = st.progress(0)
                 total = len(groups_boundary)
+                mined = 0
                 for i, ((seg_idx, area), case_ids) in enumerate(groups_boundary.items()):
+                    if (seg_idx, area) not in multi_act_groups:
+                        continue
                     mask = split_df["case:concept:name"].isin(case_ids)
                     sub_df = split_df[mask].copy()
                     label = f"{area}_seg{seg_idx}"
@@ -187,7 +213,8 @@ elif page == PAGES[2]:
                         result = mine_group(sub_df, orig_area_map)
                     result["sub_df"] = sub_df
                     boundary_results[label] = result
-                    progress.progress((i + 1) / (total * 2))
+                    mined += 1
+                    progress.progress((i + 1) / total)
 
                 st.session_state["boundary_results"] = boundary_results
 
@@ -237,9 +264,10 @@ elif page == PAGES[2]:
                 for label, result in all_results.items():
                     pbb_name = pbb_labels[label]
                     with st.expander(f"**{pbb_name}** ({label}) — Fitness: {result['fitness']:.4f} | Precision: {result['precision']:.4f} | {result['n_sublogs']} sublogs", expanded=True):
-                        st.write("**Variants allowed:**")
-                        for seq, count in result["variants_allowed"]:
-                            st.write(f"  [{count:3d}x] {seq}")
+                        if result["variants_allowed"]:
+                            st.write("**Variants allowed:**")
+                            for seq, count in result["variants_allowed"]:
+                                st.write(f"  [{count:3d}x] {seq}")
                         if result["variants_not_allowed"]:
                             st.write("**Variants not allowed:**")
                             for seq, count in result["variants_not_allowed"]:
@@ -271,13 +299,12 @@ elif page == PAGES[2]:
                             "reconnected directly.\n"
                             "- No re-mining or conformance check — it is a structural merge only."
                         )
-                    with st.form("combine_h_form"):
-                        ordered = st.multiselect(
-                            "Select PBBs (in order)",
-                            options=pbb_options,
-                        )
-                        combine_h_submitted = st.form_submit_button("Chain Models")
-                    if combine_h_submitted and len(ordered) >= 2:
+                    ordered = st.multiselect(
+                        "Select PBBs (in order)",
+                        options=pbb_options,
+                        key="combine_h_select",
+                    )
+                    if st.button("Create New PBB", key="combine_h_btn") and len(ordered) >= 2:
                         bpmns = [all_results[pbb_key_map[d]]["bpmn"] for d in ordered]
                         with st.spinner("Chaining BPMNs..."):
                             combined_bpmn = combine_horizontal(bpmns)
@@ -294,6 +321,7 @@ elif page == PAGES[2]:
                             "variants_not_allowed": [],
                         }
                         st.session_state.setdefault("combined_results", {})[combined_key] = combined_pbb
+                        st.rerun()
 
                 else:
                     with st.expander("How it works", expanded=False):
@@ -304,13 +332,12 @@ elif page == PAGES[2]:
                             "- Gateways, duplicates and parallelism are **preserved** in the new model.\n"
                             "- Fitness and precision are re-evaluated on the merged log."
                         )
-                    with st.form("combine_v_form"):
-                        chosen = st.multiselect(
-                            "Select PBBs to merge",
-                            options=pbb_options,
-                        )
-                        combine_v_submitted = st.form_submit_button("Merge & Re-mine")
-                    if combine_v_submitted and len(chosen) >= 2:
+                    chosen = st.multiselect(
+                        "Select PBBs to merge",
+                        options=pbb_options,
+                        key="combine_v_select",
+                    )
+                    if st.button("Create New PBB", key="combine_v_btn") and len(chosen) >= 2:
                         sublogs = [all_results[pbb_key_map[d]]["sub_df"] for d in chosen]
                         with st.spinner("Merging logs & re-mining..."):
                             combined_result = combine_vertical(
@@ -322,6 +349,7 @@ elif page == PAGES[2]:
                         combined_key = f"[Combined] {combined_name}"
                         combined_result["sub_df"] = pd.concat(sublogs, ignore_index=True)
                         st.session_state.setdefault("combined_results", {})[combined_key] = combined_result
+                        st.rerun()
 
                 # Selection for export
                 st.divider()
