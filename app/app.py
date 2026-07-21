@@ -278,6 +278,14 @@ elif page == PAGES[2]:
                             st.image(str(tmp_bpmn))
                         except Exception as e:
                             st.warning(f"Could not render BPMN: {e}")
+                        if st.button("Remove", key=f"del_{pbb_name}"):
+                            if label.startswith("[Boundary Change] "):
+                                st.session_state["boundary_results"].pop(label.removeprefix("[Boundary Change] "), None)
+                            elif label.startswith("[Variant Based] "):
+                                st.session_state["activity_results"].pop(label.removeprefix("[Variant Based] "), None)
+                            elif label.startswith("[Combined] "):
+                                st.session_state["combined_results"].pop(label, None)
+                            st.rerun()
 
                 # --- Combine PBBs ---
                 st.divider()
